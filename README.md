@@ -34,6 +34,7 @@ cp .env.example .env
 | `DB_ALLOWED_DATABASES`        | No        | (todas)     | Allowlist separada por comas. Si está vacía, se permiten todas las BD accesibles por la cuenta. |
 | `DB_ENCRYPT`                  | No        | `true`      | Cifra la conexión TLS.                                                                        |
 | `DB_TRUST_SERVER_CERTIFICATE` | No        | `true`      | Acepta certificados no verificados. Útil en dev; ponlo en `false` en producción con cert válido. |
+| `DB_IDLE_TIMEOUT_MS`          | No        | `300000`    | Cierra los pools de conexión tras N ms sin uso para liberar sesiones en el servidor. `0` = nunca. |
 
 > **Seguridad:** `.env` está en `.gitignore` y no debe versionarse. Si tu cuenta ve BDs sensibles que no quieres exponer al modelo, usa `DB_ALLOWED_DATABASES` para limitar el alcance.
 
@@ -76,10 +77,12 @@ Todas las tools que operan sobre una BD aceptan un parámetro opcional **`databa
 
 ### `list_databases`
 
-Lista las bases de datos del servidor a las que la cuenta tiene acceso. Excluye las de sistema (`master`, `model`, `msdb`, `tempdb`) y respeta `DB_ALLOWED_DATABASES`.
+**¿Qué hace?** Te dice qué bases de datos puedes ver con tu usuario. Es el primer paso cuando no sabes qué hay disponible en el servidor.
+
+No muestra las bases de datos internas del sistema (`master`, `model`, `msdb`, `tempdb`), y si configuraste una lista permitida (`DB_ALLOWED_DATABASES`), solo muestra esas.
 
 - **Parámetros:** ninguno.
-- **Devuelve:** array de nombres de BD.
+- **Devuelve:** una lista con los nombres de las bases de datos.
 
 ```json
 ["MacropayPF", "Ventas", "RRHH"]
@@ -87,10 +90,12 @@ Lista las bases de datos del servidor a las que la cuenta tiene acceso. Excluye 
 
 ### `list_tables`
 
-Lista todas las tablas base de una BD.
+**¿Qué hace?** Te muestra todas las tablas que hay dentro de una base de datos. Útil para ver qué información se guarda ahí.
 
-- **Parámetros:** `database?` (string, opcional).
-- **Devuelve:** array de `schema.tabla`.
+Si no indicas una base de datos, usa la que tengas puesta por defecto (`DB_NAME`).
+
+- **Parámetros:** `database` (opcional) — el nombre de la base de datos.
+- **Devuelve:** una lista de tablas en formato `esquema.tabla`.
 
 ```json
 ["dbo.Clientes", "dbo.Pedidos", "ventas.Facturas"]
@@ -98,10 +103,14 @@ Lista todas las tablas base de una BD.
 
 ### `get_ddl`
 
-Genera un `CREATE TABLE` sintético de una tabla, incluyendo tipos con longitud/precisión, `IDENTITY`, `DEFAULT` y la `PRIMARY KEY`.
+**¿Qué hace?** Te arma el "molde" de una tabla: la instrucción `CREATE TABLE` que la crearía desde cero. Sirve para ver de un vistazo qué columnas tiene, de qué tipo son, cuáles se pueden dejar vacías y cuál es la columna clave.
 
-- **Parámetros:** `table` (string, requerido), `database?` (string, opcional).
-- **Devuelve:** texto con el DDL.
+Incluye el tipo de cada columna (y su tamaño), si se genera sola (`IDENTITY`), el valor por defecto y la clave principal (`PRIMARY KEY`).
+
+- **Parámetros:**
+  - `table` (obligatorio) — el nombre de la tabla.
+  - `database` (opcional) — la base de datos; si no la pones, usa la de por defecto.
+- **Devuelve:** el texto de la tabla en formato SQL.
 
 ```sql
 CREATE TABLE [dbo].[Clientes] (
@@ -114,10 +123,14 @@ CREATE TABLE [dbo].[Clientes] (
 
 ### `describe_table`
 
-Describe una tabla en **JSON estructurado**: cada columna con su tipo, nullabilidad, default, si es `IDENTITY` y si forma parte de la PK. Más fácil de consumir programáticamente que el DDL de texto.
+**¿Qué hace?** Es parecido a `get_ddl`, pero en vez de darte texto SQL, te devuelve la información de la tabla ordenada en forma de datos (JSON). Es la mejor opción cuando otro programa (o la IA) necesita leer la estructura campo por campo.
 
-- **Parámetros:** `table` (string, requerido), `database?` (string, opcional).
-- **Devuelve:** objeto `{ database, table, columns[], primaryKey[] }`.
+Por cada columna te dice: su nombre, su tipo, si se puede dejar vacía, su valor por defecto, si se genera sola y si es parte de la clave principal.
+
+- **Parámetros:**
+  - `table` (obligatorio) — el nombre de la tabla.
+  - `database` (opcional) — la base de datos; si no la pones, usa la de por defecto.
+- **Devuelve:** un objeto con los datos de la tabla y sus columnas.
 
 ```json
 {
@@ -143,10 +156,12 @@ Describe una tabla en **JSON estructurado**: cada columna con su tipo, nullabili
 
 ### `get_foreign_keys`
 
-Lista las claves foráneas de una tabla: columna origen y tabla/columna referenciada.
+**¿Qué hace?** Te muestra cómo se conecta una tabla con otras. Las "claves foráneas" son columnas que apuntan a otra tabla (por ejemplo, la columna `ClienteId` de la tabla de pedidos apunta a la tabla de clientes). Sirve para entender qué tablas están relacionadas entre sí.
 
-- **Parámetros:** `table` (string, requerido), `database?` (string, opcional).
-- **Devuelve:** objeto `{ database, table, foreignKeys[] }`.
+- **Parámetros:**
+  - `table` (obligatorio) — el nombre de la tabla.
+  - `database` (opcional) — la base de datos; si no la pones, usa la de por defecto.
+- **Devuelve:** la lista de relaciones: qué columna apunta a qué tabla y columna.
 
 ```json
 {
@@ -166,10 +181,14 @@ Lista las claves foráneas de una tabla: columna origen y tabla/columna referenc
 
 ### `search_tables`
 
-Busca tablas cuyo nombre **contenga** el patrón (coincidencia parcial, case-insensitive). Si se indica `database`, busca solo ahí; si se omite, recorre **todas** las BD accesibles (respetando la allowlist).
+**¿Qué hace?** Busca tablas por nombre, aunque solo sepas una parte. Por ejemplo, si buscas `cliente`, encuentra `Clientes`, `ClientesVIP`, etc. No distingue mayúsculas de minúsculas.
 
-- **Parámetros:** `pattern` (string, requerido), `database?` (string, opcional).
-- **Devuelve:** array de `{ database, schema, table }`.
+Si no indicas una base de datos, busca en **todas** las que puedes ver (muy útil cuando no recuerdas en cuál está la tabla).
+
+- **Parámetros:**
+  - `pattern` (obligatorio) — el texto a buscar dentro del nombre de la tabla.
+  - `database` (opcional) — para buscar solo en una base de datos.
+- **Devuelve:** la lista de tablas que coinciden, con su base de datos y esquema.
 
 ```json
 [
@@ -180,10 +199,14 @@ Busca tablas cuyo nombre **contenga** el patrón (coincidencia parcial, case-ins
 
 ### `search_columns`
 
-Busca columnas cuyo nombre **contenga** el patrón. Muy útil para encontrar en qué tabla (y BD) vive un campo como `email` o `id_cliente`. Si se omite `database`, recorre todas las BD accesibles.
+**¿Qué hace?** Busca columnas (campos) por nombre en cualquier tabla. Es la herramienta ideal cuando sabes qué dato buscas pero no en qué tabla está guardado. Por ejemplo, buscar `email` te dice en qué tablas existe una columna de correo.
 
-- **Parámetros:** `pattern` (string, requerido), `database?` (string, opcional).
-- **Devuelve:** array de `{ database, schema, table, column, type }`.
+Si no indicas una base de datos, busca en **todas** las que puedes ver.
+
+- **Parámetros:**
+  - `pattern` (obligatorio) — el texto a buscar dentro del nombre de la columna.
+  - `database` (opcional) — para buscar solo en una base de datos.
+- **Devuelve:** la lista de columnas que coinciden, indicando en qué base de datos, tabla y de qué tipo son.
 
 ```json
 [
@@ -209,18 +232,31 @@ Para descubrir un esquema que no conoces:
 4. **`get_foreign_keys`** → entender sus relaciones.
 5. **`search_columns`** → cuando buscas un campo pero no sabes en qué tabla está.
 
+## Ciclo de vida y conexiones
+
+Al usar transporte **stdio**, el proceso del servidor lo **arranca y detiene el cliente MCP**: vive mientras el cliente lo tenga conectado y se apaga al cerrarlo. No es un servicio que corra 24/7.
+
+Las conexiones a la BD se manejan así:
+
+- Se abren **de forma perezosa** (lazy): solo cuando una tool necesita una BD por primera vez.
+- Se **cierran solas tras inactividad** (`DB_IDLE_TIMEOUT_MS`, 5 min por defecto) para no mantener sesiones ocupadas en el servidor. La siguiente llamada reconecta de forma transparente.
+
+Resultado: el MCP responde al instante cuando lo usas y no deja conexiones colgando cuando no.
+
 ## Notas de diseño
 
 - **Un pool de conexiones por base de datos**, cacheado y con reconexión automática si se cae.
 - Los **identificadores se escapan** (`]` → `]]`) y los valores de búsqueda van **parametrizados**, evitando inyección en las consultas de catálogo.
 - Las búsquedas multi-BD son **tolerantes a fallos**: si una BD no es accesible, se omite y la búsqueda continúa en el resto.
+- El `.env` se carga con un cargador propio (`env.ts`) sin dependencias, para no escribir nada en **stdout** (canal reservado al protocolo MCP).
 
 ## Estructura del proyecto
 
 ```
 .
 ├── index.ts               # Servidor MCP y registro de tools
-├── db.ts                  # Config, allowlist y pool por BD
+├── env.ts                 # Carga del .env sin dependencias (stdout limpio)
+├── db.ts                  # Config, allowlist, idle-timeout y pool por BD
 ├── tools/
 │   ├── sqlIdentifier.ts   # Escape de identificadores y parseo de nombres
 │   ├── listDatabases.ts
