@@ -1,11 +1,9 @@
-import path from "path";
-import dotenv from "dotenv";
+import { loadEnv } from "./env";
 
-// Carga el .env desde la raíz del proyecto, funcione en dev (ts-node, __dirname = raíz)
-// o compilado (node dist/index.js, __dirname = dist/). No sobreescribe variables ya
-// presentes en el entorno del sistema.
-dotenv.config({ path: path.resolve(__dirname, ".env") });
-dotenv.config({ path: path.resolve(__dirname, "..", ".env") });
+// Carga el .env antes de cualquier otra cosa. Se usa un cargador propio (env.ts)
+// en vez de dotenv porque dotenv v17 escribe "tips" en stdout, canal reservado
+// al protocolo MCP.
+loadEnv(__dirname);
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
