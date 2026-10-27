@@ -1,6 +1,6 @@
 # midd-database-mcp
 
-Servidor **MCP (Model Context Protocol)** local para **introspección de esquema de SQL Server**, con soporte **multi-base de datos**. Permite que un cliente MCP (Kiro, Claude Desktop, etc.) explore el esquema de una o varias bases de datos de un mismo servidor: listar BDs, tablas y stored procedures, obtener DDL, describir tablas y procedimientos en JSON, ver claves foráneas, leer la definición de un procedimiento y buscar tablas/columnas por nombre.
+Servidor **MCP (Model Context Protocol)** local para **introspección de esquema de SQL Server**, con soporte **multi-base de datos**. Permite que un cliente MCP (Kiro, Claude Desktop, etc.) explore el esquema de una o varias bases de datos de un mismo servidor: listar BDs, tablas, vistas y stored procedures, obtener DDL, describir tablas, vistas y procedimientos en JSON, ver claves foráneas, leer la definición de una vista o un procedimiento y buscar tablas/columnas por nombre.
 
 > Es **solo lectura / introspección**. No ejecuta DML ni DDL sobre la base de datos; únicamente consulta las vistas de catálogo (`INFORMATION_SCHEMA` y `sys.*`).
 
@@ -53,16 +53,17 @@ cubrir esos huecos puedes configurar una segunda cuenta **opcional** con
   principal y se reintenta con la secundaria si la principal **falla**
   (típicamente por falta de permiso a la BD u objeto).
 - En las tools sobre un objeto concreto (`describe_table`, `get_ddl`,
-  `get_foreign_keys`, `describe_procedure`, `get_procedure_definition`), si la
-  cuenta principal **no ve el objeto** también se reintenta con la secundaria;
-  si ninguna de las dos lo ve, el error "no existe" se propaga. En
-  `get_procedure_definition`, además, si la definición no se puede leer
-  (procedimiento cifrado o sin `VIEW DEFINITION`) también se intenta con la
-  otra cuenta.
+  `get_foreign_keys`, `describe_procedure`, `get_procedure_definition`,
+  `describe_view`, `get_view_definition`), si la cuenta principal **no ve el
+  objeto** también se reintenta con la secundaria; si ninguna de las dos lo ve,
+  el error "no existe" se propaga. En `get_procedure_definition` y
+  `get_view_definition`, además, si la definición no se puede leer (objeto
+  cifrado con `WITH ENCRYPTION` o sin `VIEW DEFINITION`) también se intenta con
+  la otra cuenta.
 - En las tools de listado y búsqueda (`list_databases`, `list_tables`,
-  `list_procedures`, `search_tables`, `search_columns`), un resultado vacío
-  **no** dispara el fallback: significa que la cuenta sí pudo consultar y no
-  había coincidencias.
+  `list_views`, `list_procedures`, `search_tables`, `search_columns`), un
+  resultado vacío **no** dispara el fallback: significa que la cuenta sí pudo
+  consultar y no había coincidencias.
 - Las conexiones de cada cuenta se mantienen en pools separados, por lo que no
   se mezclan credenciales.
 
@@ -319,6 +320,72 @@ BEGIN
 END
 ```
 
+### `list_views`
+
+**¿Qué hace?** Te muestra todas las vistas de una base de datos. Una vista es una consulta guardada que se comporta como una tabla virtual; útil para ver qué consultas predefinidas hay disponibles. No incluye las vistas de sistema.
+
+Si no indicas una base de datos, usa la que tengas puesta por defecto (`DB_NAME`).
+
+- **Parámetros:** `database` (opcional) — el nombre de la base de datos.
+- **Devuelve:** una lista de vistas en formato `esquema.vista`.
+
+```json
+["dbo.vw_ClientesActivos", "ventas.vw_ResumenMensual"]
+```
+
+### `describe_view`
+
+**¿Qué hace?** Te muestra las columnas que expone una vista, ordenadas en forma de datos (JSON): el nombre de cada columna, su tipo y si puede quedar vacía. A diferencia de una tabla, una vista no tiene columna que se genere sola (`IDENTITY`) ni clave principal propia, por eso el resultado se limita a las columnas.
+
+- **Parámetros:**
+  - `view` (obligatorio) — el nombre de la vista.
+  - `database` (opcional) — la base de datos; si no la pones, usa la de por defecto.
+- **Devuelve:** un objeto con los datos de la vista y sus columnas.
+
+```json
+{
+  "database": "MacropayPF",
+  "view": "dbo.vw_ClientesActivos",
+  "columns": [
+    {
+      "name": "Id",
+      "type": "INT",
+      "maxLength": null,
+      "precision": 10,
+      "scale": 0,
+      "nullable": false,
+      "ordinalPosition": 1
+    },
+    {
+      "name": "Nombre",
+      "type": "NVARCHAR",
+      "maxLength": 100,
+      "precision": null,
+      "scale": null,
+      "nullable": false,
+      "ordinalPosition": 2
+    }
+  ]
+}
+```
+
+### `get_view_definition`
+
+**¿Qué hace?** Te devuelve el código completo de la vista (el texto `CREATE VIEW ...`). Sirve para entender exactamente qué consulta ejecuta por dentro. Requiere el permiso `VIEW DEFINITION` sobre el objeto; si la vista está cifrada (`WITH ENCRYPTION`) o la cuenta no tiene ese permiso, la definición no se puede leer (y ahí la cuenta secundaria de respaldo ayuda).
+
+- **Parámetros:**
+  - `view` (obligatorio) — el nombre de la vista.
+  - `database` (opcional) — la base de datos; si no la pones, usa la de por defecto.
+- **Devuelve:** el texto de la vista en formato SQL.
+
+```sql
+CREATE VIEW [dbo].[vw_ClientesActivos]
+AS
+  SELECT Id, Nombre
+  FROM dbo.Clientes
+  WHERE Activo = 1
+```
+
 ---
 
 ## Flujo de uso típico
@@ -332,6 +399,8 @@ Para descubrir un esquema que no conoces:
 5. **`search_columns`** → cuando buscas un campo pero no sabes en qué tabla está.
 6. **`list_procedures`** → ver qué stored procedures hay en la BD.
 7. **`describe_procedure`** o **`get_procedure_definition`** → ver los parámetros o el código de un procedimiento.
+8. **`list_views`** → ver qué vistas hay en la BD.
+9. **`describe_view`** o **`get_view_definition`** → ver las columnas que expone una vista o el código que la define.
 
 ## Ciclo de vida y conexiones
 
@@ -369,7 +438,10 @@ Resultado: el MCP responde al instante cuando lo usas y no deja conexiones colga
 │   ├── searchColumns.ts
 │   ├── listProcedures.ts
 │   ├── describeProcedure.ts
-│   └── getProcedureDefinition.ts
+│   ├── getProcedureDefinition.ts
+│   ├── listViews.ts
+│   ├── describeView.ts
+│   └── getViewDefinition.ts
 ├── .env.example
 ├── package.json
 └── tsconfig.json

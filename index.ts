@@ -19,6 +19,9 @@ import { searchColumns } from "./tools/searchColumns";
 import { listProcedures } from "./tools/listProcedures";
 import { describeProcedure } from "./tools/describeProcedure";
 import { getProcedureDefinition } from "./tools/getProcedureDefinition";
+import { listViews } from "./tools/listViews";
+import { describeView } from "./tools/describeView";
+import { getViewDefinition } from "./tools/getViewDefinition";
 import { closePool } from "./db";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -240,6 +243,63 @@ server.tool(
   async ({ procedure, database }) => {
     try {
       const result = await getProcedureDefinition(procedure, database);
+      return text(result.definition);
+    } catch (err) {
+      return errorResponse(err);
+    }
+  }
+);
+
+// ── Tool: list_views ──────────────────────────────────────────────────────────
+
+// @ts-ignore - Evita error TS2589: Type instantiation is excessively deep
+server.tool(
+  "list_views",
+  "Lista las vistas de una base de datos (excluye las de sistema). Acepta 'database' opcional.",
+  databaseParam,
+  async ({ database }) => {
+    try {
+      const result = await listViews(database);
+      return json(result.views);
+    } catch (err) {
+      return errorResponse(err);
+    }
+  }
+);
+
+// ── Tool: describe_view ───────────────────────────────────────────────────────
+
+// @ts-ignore - Evita error TS2589: Type instantiation is excessively deep
+server.tool(
+  "describe_view",
+  "Describe una vista en JSON estructurado: las columnas que expone (tipo, longitud/precisión, nullabilidad y posición).",
+  {
+    view: z.string().describe("Nombre de la vista ('schema.vista' o 'vista')."),
+    ...databaseParam,
+  },
+  async ({ view, database }) => {
+    try {
+      const result = await describeView(view, database);
+      return json(result);
+    } catch (err) {
+      return errorResponse(err);
+    }
+  }
+);
+
+// ── Tool: get_view_definition ─────────────────────────────────────────────────
+
+// @ts-ignore - Evita error TS2589: Type instantiation is excessively deep
+server.tool(
+  "get_view_definition",
+  "Obtiene el texto de definición (CREATE VIEW ...) de una vista. Requiere permiso VIEW DEFINITION.",
+  {
+    view: z.string().describe("Nombre de la vista ('schema.vista' o 'vista')."),
+    ...databaseParam,
+  },
+  async ({ view, database }) => {
+    try {
+      const result = await getViewDefinition(view, database);
       return text(result.definition);
     } catch (err) {
       return errorResponse(err);
