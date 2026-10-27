@@ -1,4 +1,4 @@
-import { getPool, resolveDatabase } from "../db";
+import { resolveDatabase, withAccount } from "../db";
 import { listDatabases } from "./listDatabases";
 import sql from "mssql";
 
@@ -34,25 +34,28 @@ export async function searchTables(
 
   for (const db of targets) {
     try {
-      const pool = await getPool(db);
-      const result = await pool
-        .request()
-        .input("pattern", sql.NVarChar, `%${pattern}%`)
-        .query(`
-          SELECT TABLE_SCHEMA, TABLE_NAME
-          FROM INFORMATION_SCHEMA.TABLES
-          WHERE TABLE_TYPE = 'BASE TABLE'
-            AND TABLE_NAME LIKE @pattern
-          ORDER BY TABLE_SCHEMA, TABLE_NAME
-        `);
+      // Por cada BD: busca con la cuenta principal y, si falla por permisos,
+      // reintenta con la cuenta secundaria.
+      const dbMatches = await withAccount(db, async ({ pool }) => {
+        const result = await pool
+          .request()
+          .input("pattern", sql.NVarChar, `%${pattern}%`)
+          .query(`
+            SELECT TABLE_SCHEMA, TABLE_NAME
+            FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_TYPE = 'BASE TABLE'
+              AND TABLE_NAME LIKE @pattern
+            ORDER BY TABLE_SCHEMA, TABLE_NAME
+          `);
 
-      for (const row of result.recordset) {
-        matches.push({
+        return result.recordset.map((row) => ({
           database: db,
           schema: row.TABLE_SCHEMA as string,
           table: row.TABLE_NAME as string,
-        });
-      }
+        })) as TableMatch[];
+      });
+
+      matches.push(...dbMatches);
     } catch (err) {
       // No cortar toda la búsqueda si una BD falla (p. ej. permisos).
       const message = err instanceof Error ? err.message : String(err);

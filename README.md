@@ -30,6 +30,8 @@ cp .env.example .env
 | `DB_HOST`                     | Sí        | —           | Host/servidor de SQL Server.                                                                  |
 | `DB_USER`                     | Sí        | —           | Usuario.                                                                                      |
 | `DB_PASSWORD`                 | Sí        | —           | Contraseña.                                                                                   |
+| `DB_USER2`                    | No        | —           | Usuario de la cuenta de respaldo. Ver *Cuenta secundaria de respaldo*.                        |
+| `DB_PASSWORD2`                | No        | —           | Contraseña de la cuenta de respaldo. Debe ir junto con `DB_USER2`.                            |
 | `DB_NAME`                     | No        | —           | BD por defecto. Se usa cuando una tool no recibe `database`. Si se omite, `database` es obligatorio en cada llamada. |
 | `DB_ALLOWED_DATABASES`        | No        | (todas)     | Allowlist separada por comas. Si está vacía, se permiten todas las BD accesibles por la cuenta. |
 | `DB_ENCRYPT`                  | No        | `true`      | Cifra la conexión TLS.                                                                        |
@@ -37,6 +39,28 @@ cp .env.example .env
 | `DB_IDLE_TIMEOUT_MS`          | No        | `300000`    | Cierra los pools de conexión tras N ms sin uso para liberar sesiones en el servidor. `0` = nunca. |
 
 > **Seguridad:** `.env` está en `.gitignore` y no debe versionarse. Si tu cuenta ve BDs sensibles que no quieres exponer al modelo, usa `DB_ALLOWED_DATABASES` para limitar el alcance.
+
+### Cuenta secundaria de respaldo (opcional)
+
+A veces la cuenta principal no tiene permiso sobre todos los componentes. Para
+cubrir esos huecos puedes configurar una segunda cuenta **opcional** con
+`DB_USER2` y `DB_PASSWORD2`:
+
+- Solo se activa si **ambas** variables están definidas. Si falta cualquiera de
+  las dos, la cuenta secundaria se ignora por completo (sin error): el servidor
+  se comporta igual que antes.
+- Cuando está configurada, cada consulta se intenta primero con la cuenta
+  principal y se reintenta con la secundaria si la principal **falla**
+  (típicamente por falta de permiso a la BD u objeto).
+- En las tools sobre una tabla concreta (`describe_table`, `get_ddl`,
+  `get_foreign_keys`), si la cuenta principal **no ve la tabla** también se
+  reintenta con la secundaria; si ninguna de las dos la ve, el error
+  "la tabla no existe" se propaga.
+- En las tools de listado y búsqueda (`list_databases`, `list_tables`,
+  `search_tables`, `search_columns`), un resultado vacío **no** dispara el
+  fallback: significa que la cuenta sí pudo consultar y no había coincidencias.
+- Las conexiones de cada cuenta se mantienen en pools separados, por lo que no
+  se mezclan credenciales.
 
 ## Ejecución
 

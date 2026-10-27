@@ -1,4 +1,4 @@
-import { getPool, resolveDatabase } from "../db";
+import { resolveDatabase, withAccount } from "../db";
 import { listDatabases } from "./listDatabases";
 import sql from "mssql";
 
@@ -37,26 +37,29 @@ export async function searchColumns(
 
   for (const db of targets) {
     try {
-      const pool = await getPool(db);
-      const result = await pool
-        .request()
-        .input("pattern", sql.NVarChar, `%${pattern}%`)
-        .query(`
-          SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, DATA_TYPE
-          FROM INFORMATION_SCHEMA.COLUMNS
-          WHERE COLUMN_NAME LIKE @pattern
-          ORDER BY TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME
-        `);
+      // Por cada BD: busca con la cuenta principal y, si falla por permisos,
+      // reintenta con la cuenta secundaria.
+      const dbMatches = await withAccount(db, async ({ pool }) => {
+        const result = await pool
+          .request()
+          .input("pattern", sql.NVarChar, `%${pattern}%`)
+          .query(`
+            SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, DATA_TYPE
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE COLUMN_NAME LIKE @pattern
+            ORDER BY TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME
+          `);
 
-      for (const row of result.recordset) {
-        matches.push({
+        return result.recordset.map((row) => ({
           database: db,
           schema: row.TABLE_SCHEMA as string,
           table: row.TABLE_NAME as string,
           column: row.COLUMN_NAME as string,
           type: (row.DATA_TYPE as string).toUpperCase(),
-        });
-      }
+        })) as ColumnMatch[];
+      });
+
+      matches.push(...dbMatches);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[searchColumns] No se pudo buscar en "${db}": ${message}`);

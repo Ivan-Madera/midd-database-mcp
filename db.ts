@@ -2,16 +2,26 @@ import sql from "mssql";
 
 // ── Configuración ────────────────────────────────────────────────────────────
 
-interface DbConfig {
-  host: string;
+interface Credentials {
   user: string;
   password: string;
+}
+
+interface DbConfig {
+  host: string;
+  /** Cuenta principal (requerida). */
+  primary: Credentials;
+  /** Cuenta secundaria opcional. Si está presente, se usa como fallback. */
+  secondary: Credentials | null;
   defaultDatabase: string | undefined;
   encrypt: boolean;
   trustServerCertificate: boolean;
   allowedDatabases: string[]; // vacío = todas las BD accesibles
   idleTimeoutMs: number; // 0 = nunca cerrar por inactividad
 }
+
+/** Identifica cuál de las cuentas se está usando. */
+export type AccountKind = "primary" | "secondary";
 
 let config: DbConfig | null = null;
 
@@ -30,6 +40,13 @@ function loadConfig(): DbConfig {
     ].filter(Boolean);
     throw new Error(`Variables de entorno faltantes: ${missing.join(", ")}`);
   }
+
+  // Cuenta secundaria OPCIONAL. Solo se activa si AMBAS variables están
+  // presentes; si falta una de las dos, se ignora por completo (sin error).
+  const user2 = process.env.DB_USER2?.trim();
+  const password2 = process.env.DB_PASSWORD2;
+  const secondary: Credentials | null =
+    user2 && password2 ? { user: user2, password: password2 } : null;
 
   const parseBool = (value: string | undefined, fallback: boolean): boolean => {
     if (value === undefined) return fallback;
@@ -51,8 +68,8 @@ function loadConfig(): DbConfig {
 
   config = {
     host,
-    user,
-    password,
+    primary: { user, password },
+    secondary,
     defaultDatabase: process.env.DB_NAME || undefined,
     // encrypt por defecto true (seguro); configurable con DB_ENCRYPT
     encrypt: parseBool(process.env.DB_ENCRYPT, true),
@@ -63,6 +80,17 @@ function loadConfig(): DbConfig {
   };
 
   return config;
+}
+
+/** Indica si hay una cuenta secundaria de fallback configurada. */
+export function hasSecondaryAccount(): boolean {
+  return loadConfig().secondary !== null;
+}
+
+/** Credenciales de la cuenta indicada (null si la secundaria no existe). */
+function getCredentials(account: AccountKind): Credentials | null {
+  const cfg = loadConfig();
+  return account === "primary" ? cfg.primary : cfg.secondary;
 }
 
 // ── Allowlist de bases de datos ───────────────────────────────────────────────
@@ -107,13 +135,19 @@ export function resolveDatabase(database?: string): string {
   return target;
 }
 
-// ── Pool por base de datos (con caché) ─────────────────────────────────────────
+// ── Pool por cuenta + base de datos (con caché) ────────────────────────────────
+// La clave combina la cuenta y la BD para no mezclar credenciales distintas
+// sobre la misma base de datos.
 
 const pools = new Map<string, sql.ConnectionPool>();
 // Promesas en vuelo para evitar conexiones duplicadas por carreras.
 const connecting = new Map<string, Promise<sql.ConnectionPool>>();
-// Temporizadores de inactividad por BD.
+// Temporizadores de inactividad por pool.
 const idleTimers = new Map<string, NodeJS.Timeout>();
+
+function poolKey(account: AccountKind, database: string): string {
+  return `${account}::${database.toLowerCase()}`;
+}
 
 /**
  * (Re)inicia el temporizador de inactividad de un pool. Al expirar, cierra
@@ -149,14 +183,22 @@ function scheduleIdleClose(key: string): void {
 }
 
 /**
- * Obtiene (o crea) un pool de conexiones para la BD indicada.
- * Si no se indica, usa DB_NAME. Reconecta si el pool quedó caído.
+ * Obtiene (o crea) un pool de conexiones para la cuenta y BD indicadas.
+ * Si no se indica BD, usa DB_NAME. Reconecta si el pool quedó caído.
  * Cada uso reinicia el temporizador de inactividad del pool.
  */
-export async function getPool(database?: string): Promise<sql.ConnectionPool> {
+export async function getPool(
+  database?: string,
+  account: AccountKind = "primary"
+): Promise<sql.ConnectionPool> {
   const cfg = loadConfig();
   const target = resolveDatabase(database);
-  const key = target.toLowerCase();
+  const credentials = getCredentials(account);
+  if (!credentials) {
+    throw new Error(`No hay credenciales configuradas para la cuenta "${account}".`);
+  }
+
+  const key = poolKey(account, target);
 
   const existing = pools.get(key);
   if (existing && existing.connected) {
@@ -179,8 +221,8 @@ export async function getPool(database?: string): Promise<sql.ConnectionPool> {
 
   const connectPromise = (async () => {
     const pool = new sql.ConnectionPool({
-      user: cfg.user,
-      password: cfg.password,
+      user: credentials.user,
+      password: credentials.password,
       server: cfg.host,
       database: target,
       options: {
@@ -191,7 +233,7 @@ export async function getPool(database?: string): Promise<sql.ConnectionPool> {
 
     // Evita que un error de red tire el proceso.
     pool.on("error", (err) => {
-      console.error(`[db] Error en el pool "${target}":`, err.message);
+      console.error(`[db] Error en el pool "${key}":`, err.message);
     });
 
     await pool.connect();
@@ -206,6 +248,58 @@ export async function getPool(database?: string): Promise<sql.ConnectionPool> {
   } finally {
     connecting.delete(key);
   }
+}
+
+// ── Ejecución con fallback a la cuenta secundaria ──────────────────────────────
+
+/** Contexto que recibe el callback de `withAccount`. */
+export interface AccountRunContext {
+  pool: sql.ConnectionPool;
+  account: AccountKind;
+  database: string;
+}
+
+/**
+ * Ejecuta `fn` contra la BD indicada usando la cuenta principal y, si hay una
+ * cuenta secundaria configurada, reintenta con ella SOLO cuando la cuenta
+ * principal lanza un error (típicamente falta de permiso a la BD/objeto).
+ *
+ * Un resultado vacío (0 filas) NO dispara el fallback: significa que la cuenta
+ * principal sí pudo consultar y simplemente no había coincidencias.
+ *
+ * Si ambas cuentas fallan, relanza el error de la secundaria (o el de la
+ * principal si no hay secundaria).
+ */
+export async function withAccount<T>(
+  database: string | undefined,
+  fn: (ctx: AccountRunContext) => Promise<T>
+): Promise<T> {
+  const target = resolveDatabase(database);
+  const accounts: AccountKind[] = hasSecondaryAccount()
+    ? ["primary", "secondary"]
+    : ["primary"];
+
+  let lastError: unknown;
+
+  for (const account of accounts) {
+    try {
+      const pool = await getPool(target, account);
+      return await fn({ pool, account, database: target });
+    } catch (err) {
+      lastError = err;
+      const message = err instanceof Error ? err.message : String(err);
+      if (account === "primary" && accounts.length > 1) {
+        console.error(
+          `[db] Cuenta principal falló en "${target}" (${message}); probando cuenta secundaria.`
+        );
+        continue;
+      }
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error(String(lastError ?? "Error desconocido al ejecutar la consulta."));
 }
 
 /** Cierra todos los pools abiertos y cancela los temporizadores de inactividad. */
