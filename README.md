@@ -1,6 +1,6 @@
 # midd-database-mcp
 
-Servidor **MCP (Model Context Protocol)** local para **introspección de esquema de SQL Server**, con soporte **multi-base de datos**. Permite que un cliente MCP (Kiro, Claude Desktop, etc.) explore el esquema de una o varias bases de datos de un mismo servidor: listar BDs y tablas, obtener DDL, describir tablas en JSON, ver claves foráneas y buscar tablas/columnas por nombre.
+Servidor **MCP (Model Context Protocol)** local para **introspección de esquema de SQL Server**, con soporte **multi-base de datos**. Permite que un cliente MCP (Kiro, Claude Desktop, etc.) explore el esquema de una o varias bases de datos de un mismo servidor: listar BDs, tablas y stored procedures, obtener DDL, describir tablas y procedimientos en JSON, ver claves foráneas, leer la definición de un procedimiento y buscar tablas/columnas por nombre.
 
 > Es **solo lectura / introspección**. No ejecuta DML ni DDL sobre la base de datos; únicamente consulta las vistas de catálogo (`INFORMATION_SCHEMA` y `sys.*`).
 
@@ -52,13 +52,17 @@ cubrir esos huecos puedes configurar una segunda cuenta **opcional** con
 - Cuando está configurada, cada consulta se intenta primero con la cuenta
   principal y se reintenta con la secundaria si la principal **falla**
   (típicamente por falta de permiso a la BD u objeto).
-- En las tools sobre una tabla concreta (`describe_table`, `get_ddl`,
-  `get_foreign_keys`), si la cuenta principal **no ve la tabla** también se
-  reintenta con la secundaria; si ninguna de las dos la ve, el error
-  "la tabla no existe" se propaga.
+- En las tools sobre un objeto concreto (`describe_table`, `get_ddl`,
+  `get_foreign_keys`, `describe_procedure`, `get_procedure_definition`), si la
+  cuenta principal **no ve el objeto** también se reintenta con la secundaria;
+  si ninguna de las dos lo ve, el error "no existe" se propaga. En
+  `get_procedure_definition`, además, si la definición no se puede leer
+  (procedimiento cifrado o sin `VIEW DEFINITION`) también se intenta con la
+  otra cuenta.
 - En las tools de listado y búsqueda (`list_databases`, `list_tables`,
-  `search_tables`, `search_columns`), un resultado vacío **no** dispara el
-  fallback: significa que la cuenta sí pudo consultar y no había coincidencias.
+  `list_procedures`, `search_tables`, `search_columns`), un resultado vacío
+  **no** dispara el fallback: significa que la cuenta sí pudo consultar y no
+  había coincidencias.
 - Las conexiones de cada cuenta se mantienen en pools separados, por lo que no
   se mezclan credenciales.
 
@@ -244,6 +248,77 @@ Si no indicas una base de datos, busca en **todas** las que puedes ver.
 ]
 ```
 
+### `list_procedures`
+
+**¿Qué hace?** Te muestra todos los stored procedures (procedimientos almacenados) de una base de datos. Útil para ver qué lógica de negocio hay guardada en la BD. No incluye los procedimientos de sistema.
+
+Si no indicas una base de datos, usa la que tengas puesta por defecto (`DB_NAME`).
+
+- **Parámetros:** `database` (opcional) — el nombre de la base de datos.
+- **Devuelve:** una lista de procedimientos en formato `esquema.procedimiento`.
+
+```json
+["dbo.sp_CrearCliente", "dbo.sp_ReporteVentas", "ventas.sp_CerrarMes"]
+```
+
+### `describe_procedure`
+
+**¿Qué hace?** Te muestra los parámetros de un stored procedure sin tener que leer todo su código: cómo se llama cada parámetro, de qué tipo es y si es de entrada (`IN`), salida (`OUT`) o ambos (`INOUT`). Ideal para saber cómo invocar un procedimiento.
+
+- **Parámetros:**
+  - `procedure` (obligatorio) — el nombre del procedimiento.
+  - `database` (opcional) — la base de datos; si no la pones, usa la de por defecto.
+- **Devuelve:** un objeto con los datos del procedimiento y su lista de parámetros.
+
+```json
+{
+  "database": "MacropayPF",
+  "procedure": "dbo.sp_CrearCliente",
+  "parameters": [
+    {
+      "name": "@Nombre",
+      "type": "NVARCHAR",
+      "maxLength": 100,
+      "precision": null,
+      "scale": null,
+      "mode": "IN",
+      "isResult": false,
+      "ordinalPosition": 1
+    },
+    {
+      "name": "@NuevoId",
+      "type": "INT",
+      "maxLength": null,
+      "precision": 10,
+      "scale": 0,
+      "mode": "INOUT",
+      "isResult": false,
+      "ordinalPosition": 2
+    }
+  ]
+}
+```
+
+### `get_procedure_definition`
+
+**¿Qué hace?** Te devuelve el código completo del stored procedure (el texto `CREATE PROCEDURE ...`). Sirve para entender exactamente qué hace por dentro. Requiere el permiso `VIEW DEFINITION` sobre el objeto; si el procedimiento está cifrado (`WITH ENCRYPTION`) o la cuenta no tiene ese permiso, la definición no se puede leer (y ahí la cuenta secundaria de respaldo ayuda).
+
+- **Parámetros:**
+  - `procedure` (obligatorio) — el nombre del procedimiento.
+  - `database` (opcional) — la base de datos; si no la pones, usa la de por defecto.
+- **Devuelve:** el texto del procedimiento en formato SQL.
+
+```sql
+CREATE PROCEDURE [dbo].[sp_CrearCliente]
+  @Nombre NVARCHAR(100),
+  @NuevoId INT OUTPUT
+AS
+BEGIN
+  INSERT INTO dbo.Clientes (Nombre) VALUES (@Nombre);
+  SET @NuevoId = SCOPE_IDENTITY();
+END
+```
+
 ---
 
 ## Flujo de uso típico
@@ -255,6 +330,8 @@ Para descubrir un esquema que no conoces:
 3. **`describe_table`** o **`get_ddl`** → ver su estructura.
 4. **`get_foreign_keys`** → entender sus relaciones.
 5. **`search_columns`** → cuando buscas un campo pero no sabes en qué tabla está.
+6. **`list_procedures`** → ver qué stored procedures hay en la BD.
+7. **`describe_procedure`** o **`get_procedure_definition`** → ver los parámetros o el código de un procedimiento.
 
 ## Ciclo de vida y conexiones
 
@@ -289,7 +366,10 @@ Resultado: el MCP responde al instante cuando lo usas y no deja conexiones colga
 │   ├── describeTable.ts
 │   ├── getForeignKeys.ts
 │   ├── searchTables.ts
-│   └── searchColumns.ts
+│   ├── searchColumns.ts
+│   ├── listProcedures.ts
+│   ├── describeProcedure.ts
+│   └── getProcedureDefinition.ts
 ├── .env.example
 ├── package.json
 └── tsconfig.json

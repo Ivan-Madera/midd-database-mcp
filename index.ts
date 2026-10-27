@@ -16,6 +16,9 @@ import { describeTable } from "./tools/describeTable";
 import { getForeignKeys } from "./tools/getForeignKeys";
 import { searchTables } from "./tools/searchTables";
 import { searchColumns } from "./tools/searchColumns";
+import { listProcedures } from "./tools/listProcedures";
+import { describeProcedure } from "./tools/describeProcedure";
+import { getProcedureDefinition } from "./tools/getProcedureDefinition";
 import { closePool } from "./db";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -181,6 +184,63 @@ server.tool(
     try {
       const result = await searchColumns(pattern, database);
       return json(result.matches);
+    } catch (err) {
+      return errorResponse(err);
+    }
+  }
+);
+
+// ── Tool: list_procedures ─────────────────────────────────────────────────────
+
+// @ts-ignore - Evita error TS2589: Type instantiation is excessively deep
+server.tool(
+  "list_procedures",
+  "Lista los stored procedures de una base de datos (excluye los de sistema). Acepta 'database' opcional.",
+  databaseParam,
+  async ({ database }) => {
+    try {
+      const result = await listProcedures(database);
+      return json(result.procedures);
+    } catch (err) {
+      return errorResponse(err);
+    }
+  }
+);
+
+// ── Tool: describe_procedure ──────────────────────────────────────────────────
+
+// @ts-ignore - Evita error TS2589: Type instantiation is excessively deep
+server.tool(
+  "describe_procedure",
+  "Describe un stored procedure en JSON: sus parámetros (tipo, longitud/precisión, dirección IN/OUT/INOUT y posición).",
+  {
+    procedure: z.string().describe("Nombre del procedimiento ('schema.proc' o 'proc')."),
+    ...databaseParam,
+  },
+  async ({ procedure, database }) => {
+    try {
+      const result = await describeProcedure(procedure, database);
+      return json(result);
+    } catch (err) {
+      return errorResponse(err);
+    }
+  }
+);
+
+// ── Tool: get_procedure_definition ────────────────────────────────────────────
+
+// @ts-ignore - Evita error TS2589: Type instantiation is excessively deep
+server.tool(
+  "get_procedure_definition",
+  "Obtiene el texto de definición (CREATE PROCEDURE ...) de un stored procedure. Requiere permiso VIEW DEFINITION.",
+  {
+    procedure: z.string().describe("Nombre del procedimiento ('schema.proc' o 'proc')."),
+    ...databaseParam,
+  },
+  async ({ procedure, database }) => {
+    try {
+      const result = await getProcedureDefinition(procedure, database);
+      return text(result.definition);
     } catch (err) {
       return errorResponse(err);
     }
